@@ -1,182 +1,143 @@
 #!/bin/bash
 
-# prompt.sh - Recursive file content gatherer
-# 
-# Description:
-#   This script combines the contents of text files into a single prompt.txt file.
-#   It can be configured using prompt.yml to specify which folders and file types to include.
+# Simple text file processor that combines files into a single prompt.txt
 #
 # Usage:
-#   prompt.sh              # Run in any directory to combine file contents
-#
-# Configuration:
-#   - Create a prompt.yml file in the directory where you run the script
-#   - Format:
-#     include:
-#       - path: "lib/"     # Specify directories to include
-#         extensions:      # List file extensions to include
-#           - ".dart"
-#
-# Requirements:
-#   - yq (for YAML parsing): 
-#     macOS: brew install yq
-#     Ubuntu: apt install yq
+#   prompt                     # process all text files
+#   prompt --ignore main.dart  # everything except main.dart
+#   prompt home.dart          # finds and processes single file
+#   prompt lib/              # process all files in lib/
+#   prompt "*.dart"          # all dart files recursively
+#   prompt home.dart,settings.dart  # specific files
 #
 # Notes:
-#   - Without prompt.yml, processes all text files in current directory and subdirectories
-#   - Skips hidden files and binary files automatically
-#   - Creates prompt.example.yml on first run if prompt.yml doesn't exist
-#
-# Author: madebycm
-# Version: 1.0.0
+#   - Searches recursively in current directory
+#   - Skips binary files and files >1MB
+#   - Outputs to prompt.txt with file headers
 
-# Exit on error
-set -e
+output_file="prompt.txt"
+ignore_files=""
+max_size=$((1024 * 1024))  # 1MB in bytes
 
-# Get absolute current directory
-CURRENT_DIR=$(pwd)
+# Function to clean path (remove double slashes)
+clean_path() {
+    echo "$1" | sed 's#//#/#g'
+}
 
-# Create example configuration if prompt.yml doesn't exist
-create_example_config() {
-    if [ ! -f "prompt.yml" ] && [ ! -f "prompt.example.yml" ]; then
-        cat > prompt.example.yml << 'EOF'
-# prompt.yml - Configuration for prompt.sh
-# Copy this file to prompt.yml and modify as needed
-
-include:
-  - path: "lib/"
-    extensions:
-      - ".dart"
-
-# Optional settings (for future use)
-settings:
-  show_full_path: true
-  include_line_numbers: false
-
-# Examples:
-# include:
-#   - path: "src/"
-#     extensions:
-#       - ".js"
-#       - ".ts"
-#   - path: "docs/"
-#     extensions:
-#       - ".md"
-#       - ".txt"
-EOF
-        echo "Created prompt.example.yml - Copy to prompt.yml to customize behavior"
+# Function to check if file is text
+is_text_file() {
+    local file="$1"
+    if file "$file" | grep -q "text\|empty"; then
+        return 0
+    else
+        return 1
     fi
 }
 
-# Function to check if yq is installed
-check_yq() {
-    if ! command -v yq &> /dev/null; then
-        echo "Warning: 'yq' is not installed. Will process all text files."
-        echo "To use prompt.yml configuration, install yq:"
-        echo "brew install yq # for macOS"
-        echo "apt install yq # for Ubuntu"
+# Function to check file size
+check_file_size() {
+    local file="$1"
+    local size=$(stat -f%z "$file")
+    if [ "$size" -gt "$max_size" ]; then
         return 1
     fi
     return 0
 }
 
-# Function to check if file matches configuration
-matches_config() {
+# Function to should_ignore
+should_ignore() {
     local file="$1"
-    local relative_path="${file#./}"
-    
-    # If prompt.yml doesn't exist or yq isn't installed, return true
-    if [ ! -f "prompt.yml" ] || ! check_yq &> /dev/null; then
-        return 0
-    fi
-    
-    # Read configurations from prompt.yml
-    local paths=$(yq eval '.include[].path' prompt.yml 2>/dev/null)
-    local extensions=$(yq eval '.include[].extensions[]' prompt.yml 2>/dev/null)
-    
-    # If no configurations found, return true
-    if [ -z "$paths" ] && [ -z "$extensions" ]; then
-        return 0
-    fi
-    
-    # Check if file matches any path and extension combination
-    while IFS= read -r path; do
-        if [[ "$relative_path" == $path* ]]; then
-            while IFS= read -r ext; do
-                if [[ "$relative_path" == *"$ext" ]]; then
-                    return 0
-                fi
-            done < <(echo "$extensions")
-        fi
-    done < <(echo "$paths")
-    
-    return 1
-}
-
-# Function to check if file is likely text
-is_text_file() {
-    local file="$1"
-    file --mime-type "$file" | grep -q "text/" && return 0
-    file --mime-type "$file" | grep -q "application/json" && return 0
-    file --mime-type "$file" | grep -q "application/xml" && return 0
-    file --mime-type "$file" | grep -q "application/javascript" && return 0
-    return 1
-}
-
-# Create example configuration if needed
-create_example_config
-
-# Create header for prompt.txt
-{
-    echo "Combined contents of all text files in: $CURRENT_DIR"
-    if [ -f "prompt.yml" ]; then
-        echo "(Using configuration from prompt.yml)"
-    else
-        echo "(Including all subdirectories)"
-    fi
-    echo "Generated on: $(date)"
-    echo "============================================="
-    echo ""
-} > prompt.txt
-
-# Function to process a file
-process_file() {
-    local file="$1"
-    local relative_path="${file#./}"
-    local full_path="$CURRENT_DIR/${relative_path}"
-    
-    # Skip if it's prompt.txt itself, hidden files, or non-text files
-    if [[ "$relative_path" != "prompt.txt" && \
-          "$relative_path" != "prompt.yml" && \
-          "$relative_path" != "prompt.example.yml" && \
-          ! "$relative_path" =~ /\. && \
-          ! "$relative_path" =~ ^\..*$ && \
-          -f "$file" ]]; then
-        
-        # Check if file matches configuration (if prompt.yml exists)
-        if matches_config "$file"; then
-            if is_text_file "$file"; then
-                {
-                    echo "### File: $full_path ###"
-                    echo "----------------------------------------"
-                    cat "$file" 2>/dev/null || echo "Error reading file: $relative_path"
-                    echo ""
-                    echo "----------------------------------------"
-                    echo ""
-                } >> prompt.txt
+    if [ -n "$ignore_files" ]; then
+        IFS=',' read -ra IGNORE_ARRAY <<< "$ignore_files"
+        for ignore in "${IGNORE_ARRAY[@]}"; do
+            if [[ "${file}" == *"${ignore}"* ]]; then
+                return 0
             fi
-        fi
+        done
+    fi
+    return 1
+}
+
+# Function to process a single file
+process_file() {
+    local file="$(clean_path "$1")"
+    
+    if should_ignore "$file"; then
+        echo "Ignoring: $file"
+        return
+    fi
+    
+    if ! is_text_file "$file"; then
+        echo "Skipping binary file: $file"
+        return
+    fi
+
+    if ! check_file_size "$file"; then
+        echo "Skipping large file: $file (>1MB)"
+        return
+    fi
+    
+    echo "Processing: $file"
+    echo "// File: $file" >> "$output_file"
+    echo "-------------------" >> "$output_file"
+    cat "$file" >> "$output_file"
+    echo -e "\n\n" >> "$output_file"
+}
+
+# Function to find and process a single file
+find_and_process() {
+    local filename="$1"
+    local found_file=$(find . -type f -name "$filename" 2>/dev/null | head -n 1)
+    if [ -n "$found_file" ]; then
+        process_file "${found_file#./}"
+    else
+        echo "Not found: $filename"
     fi
 }
 
-# Export variables and functions for find
-export CURRENT_DIR
-export -f process_file
-export -f is_text_file
-export -f matches_config
-export -f check_yq
+# Clear output file
+> "$output_file"
 
-# Use find to recursively get all files, excluding hidden directories
-find . -type f -not -path '*/\.*' -exec bash -c 'process_file "$0"' {} \;
+# Parse arguments
+target=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ignore)
+            ignore_files="$2"
+            shift 2
+            ;;
+        *)
+            target="$1"
+            shift
+            ;;
+    esac
+done
 
-echo "Successfully combined all matching file contents into prompt.txt"
+# Process based on target
+if [ -z "$target" ]; then
+    # No target - process all files
+    find . -type f -print0 | while IFS= read -r -d '' file; do
+        process_file "${file#./}"
+    done
+elif [ -d "$target" ]; then
+    # Directory
+    find "$target" -type f -print0 | while IFS= read -r -d '' file; do
+        process_file "$(clean_path "${file#./}")"
+    done
+elif [[ "$target" == *","* ]]; then
+    # Comma-separated list of files
+    IFS=',' read -ra FILES <<< "$target"
+    for file in "${FILES[@]}"; do
+        find_and_process "$file"
+    done
+elif [[ "$target" == *"*"* ]]; then
+    # Glob pattern - search recursively
+    find . -type f -name "$target" -print0 | while IFS= read -r -d '' file; do
+        process_file "$(clean_path "${file#./}")"
+    done
+else
+    # Single filename
+    find_and_process "$target"
+fi
+
+echo "Output written to $output_file"
