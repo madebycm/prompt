@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# prompt.sh - Recursive file content gatherer
+# 
+# Description:
+#   This script combines the contents of text files into a single prompt.txt file.
+#   It can be configured using prompt.yml to specify which folders and file types to include.
+#
+# Usage:
+#   prompt.sh              # Run in any directory to combine file contents
+#
+# Configuration:
+#   - Create a prompt.yml file in the directory where you run the script
+#   - Format:
+#     include:
+#       - path: "lib/"     # Specify directories to include
+#         extensions:      # List file extensions to include
+#           - ".dart"
+#
+# Requirements:
+#   - yq (for YAML parsing): 
+#     macOS: brew install yq
+#     Ubuntu: apt install yq
+#
+# Notes:
+#   - Without prompt.yml, processes all text files in current directory and subdirectories
+#   - Skips hidden files and binary files automatically
+#   - Creates prompt.example.yml on first run if prompt.yml doesn't exist
+#
+# Author: madebycm
+# Version: 1.0.0
+
+# Exit on error
+set -e
+
+# Get absolute current directory
+CURRENT_DIR=$(pwd)
+
+# Create example configuration if prompt.yml doesn't exist
+create_example_config() {
+    if [ ! -f "prompt.yml" ] && [ ! -f "prompt.example.yml" ]; then
+        cat > prompt.example.yml << 'EOF'
+# prompt.yml - Configuration for prompt.sh
+# Copy this file to prompt.yml and modify as needed
+
+include:
+  - path: "lib/"
+    extensions:
+      - ".dart"
+
+# Optional settings (for future use)
+settings:
+  show_full_path: true
+  include_line_numbers: false
+
+# Examples:
+# include:
+#   - path: "src/"
+#     extensions:
+#       - ".js"
+#       - ".ts"
+#   - path: "docs/"
+#     extensions:
+#       - ".md"
+#       - ".txt"
+EOF
+        echo "Created prompt.example.yml - Copy to prompt.yml to customize behavior"
+    fi
+}
+
+# Function to check if yq is installed
+check_yq() {
+    if ! command -v yq &> /dev/null; then
+        echo "Warning: 'yq' is not installed. Will process all text files."
+        echo "To use prompt.yml configuration, install yq:"
+        echo "brew install yq # for macOS"
+        echo "apt install yq # for Ubuntu"
+        return 1
+    fi
+    return 0
+}
+
+# Function to check if file matches configuration
+matches_config() {
+    local file="$1"
+    local relative_path="${file#./}"
+    
+    # If prompt.yml doesn't exist or yq isn't installed, return true
+    if [ ! -f "prompt.yml" ] || ! check_yq &> /dev/null; then
+        return 0
+    fi
+    
+    # Read configurations from prompt.yml
+    local paths=$(yq eval '.include[].path' prompt.yml 2>/dev/null)
+    local extensions=$(yq eval '.include[].extensions[]' prompt.yml 2>/dev/null)
+    
+    # If no configurations found, return true
+    if [ -z "$paths" ] && [ -z "$extensions" ]; then
+        return 0
+    fi
+    
+    # Check if file matches any path and extension combination
+    while IFS= read -r path; do
+        if [[ "$relative_path" == $path* ]]; then
+            while IFS= read -r ext; do
+                if [[ "$relative_path" == *"$ext" ]]; then
+                    return 0
+                fi
+            done < <(echo "$extensions")
+        fi
+    done < <(echo "$paths")
+    
+    return 1
+}
+
+# Function to check if file is likely text
+is_text_file() {
+    local file="$1"
+    file --mime-type "$file" | grep -q "text/" && return 0
+    file --mime-type "$file" | grep -q "application/json" && return 0
+    file --mime-type "$file" | grep -q "application/xml" && return 0
+    file --mime-type "$file" | grep -q "application/javascript" && return 0
+    return 1
+}
+
+# Create example configuration if needed
+create_example_config
+
+# Create header for prompt.txt
+{
+    echo "Combined contents of all text files in: $CURRENT_DIR"
+    if [ -f "prompt.yml" ]; then
+        echo "(Using configuration from prompt.yml)"
+    else
+        echo "(Including all subdirectories)"
+    fi
+    echo "Generated on: $(date)"
+    echo "============================================="
+    echo ""
+} > prompt.txt
+
+# Function to process a file
+process_file() {
+    local file="$1"
+    local relative_path="${file#./}"
+    local full_path="$CURRENT_DIR/${relative_path}"
+    
+    # Skip if it's prompt.txt itself, hidden files, or non-text files
+    if [[ "$relative_path" != "prompt.txt" && \
+          "$relative_path" != "prompt.yml" && \
+          "$relative_path" != "prompt.example.yml" && \
+          ! "$relative_path" =~ /\. && \
+          ! "$relative_path" =~ ^\..*$ && \
+          -f "$file" ]]; then
+        
+        # Check if file matches configuration (if prompt.yml exists)
+        if matches_config "$file"; then
+            if is_text_file "$file"; then
+                {
+                    echo "### File: $full_path ###"
+                    echo "----------------------------------------"
+                    cat "$file" 2>/dev/null || echo "Error reading file: $relative_path"
+                    echo ""
+                    echo "----------------------------------------"
+                    echo ""
+                } >> prompt.txt
+            fi
+        fi
+    fi
+}
+
+# Export variables and functions for find
+export CURRENT_DIR
+export -f process_file
+export -f is_text_file
+export -f matches_config
+export -f check_yq
+
+# Use find to recursively get all files, excluding hidden directories
+find . -type f -not -path '*/\.*' -exec bash -c 'process_file "$0"' {} \;
+
+echo "Successfully combined all matching file contents into prompt.txt"
