@@ -14,6 +14,7 @@
 #   - Searches recursively in current directory
 #   - Skips binary files and files >1MB
 #   - Outputs to prompt.txt with file headers
+#   - Automatically ignores itself and prompt.txt
 
 output_file="prompt.txt"
 ignore_files=""
@@ -47,6 +48,13 @@ check_file_size() {
 # Function to should_ignore
 should_ignore() {
     local file="$1"
+    local basename=$(basename "$file")
+    
+    # Always ignore the script itself and the output file
+    if [[ "${file}" == *"prompt/prompt"* ]] || [[ "$basename" == "$output_file" ]]; then
+        return 0
+    fi
+    
     if [ -n "$ignore_files" ]; then
         IFS=',' read -ra IGNORE_ARRAY <<< "$ignore_files"
         for ignore in "${IGNORE_ARRAY[@]}"; do
@@ -140,4 +148,4 @@ else
     find_and_process "$target"
 fi
 
-echo "Output written to $output_file"
+echo "Output written to $output_file" 
