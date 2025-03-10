@@ -8,6 +8,8 @@
 #   --exclude=file1,file2   Exclude any file with a basename matching file1, file2, etc.
 #   --include-ext=ext1,ext2  Only include files with these extensions (without the dot)
 #   --exclude-ext=ext1,ext2  Exclude files with these extensions (without the dot)
+#   --llm                    Format output for LLM processing
+#   --llm='instructions'    Format output for LLM processing with custom instructions and copy to clipboard
 #
 # The output tags now show the full absolute path based on the directory from where the script is run.
 # The script ensures that any existing prompt.txt file is deleted before creating a new one.
@@ -17,6 +19,8 @@ INCLUDE=""
 EXCLUDE=""
 INCLUDE_EXT=""
 EXCLUDE_EXT=""
+LLM_MODE=false
+USER_INSTRUCTIONS=""
 
 # Parse command line arguments.
 for arg in "$@"; do
@@ -32,6 +36,13 @@ for arg in "$@"; do
             ;;
         --exclude-ext=*)
             EXCLUDE_EXT="${arg#*=}"
+            ;;
+        --llm=*)
+            LLM_MODE=true
+            USER_INSTRUCTIONS="${arg#*=}"
+            ;;
+        --llm)
+            LLM_MODE=true
             ;;
     esac
 done
@@ -68,6 +79,37 @@ rm -f "$OUTPUT_FILE"
 
 # Create a new empty output file.
 touch "$OUTPUT_FILE"
+
+    # If LLM mode is enabled, write the LLM template header to the output file
+if [ "$LLM_MODE" = true ]; then
+    cat << EOF > "$OUTPUT_FILE"
+You are an expert software engineer, presenting clean, readable and optimised solutions to the user's request. You work in the user's codebase, and can edit, delete or replace files.
+
+* Follow the users instructions below, and make all required code changes
+* Strictly use the <codebase> as your reference 
+* Only show a single XML file as output, with full code contents for each modification. Always show the full and working complete file.
+* You can only {replace,create,delete} files (not update)
+
+Example final output:
+
+<Modification>
+<replace p="Users/0x7f/www/vox/myfile.js>
+// all new contents here
+</replace>
+<create p="Users/0x7f/www/vox/newFile.js">
+// new file created
+</create> <delete p="Users/0x7f/www/vox/notNeeded.js">
+// this fille will be deleted
+</delete>
+</Modification>
+
+<UserInstructions>
+$USER_INSTRUCTIONS
+</UserInstructions>
+
+<Codebase>
+EOF
+fi
 
 # Process each file tracked in the current HEAD.
 git ls-tree -r HEAD --name-only | while IFS= read -r file; do
@@ -128,13 +170,56 @@ git ls-tree -r HEAD --name-only | while IFS= read -r file; do
         # Check if the file is a text file.
         if file "$file" | grep -q 'text'; then
             ABS_PATH="${BASE_DIR}/${file}"
-            echo "<${ABS_PATH}>" >> "$OUTPUT_FILE"
-            cat "$file" >> "$OUTPUT_FILE"
-            echo "" >> "$OUTPUT_FILE"
-            echo "</${ABS_PATH}>" >> "$OUTPUT_FILE"
-            echo "" >> "$OUTPUT_FILE"
+            
+            if [ "$LLM_MODE" = true ]; then
+                # In LLM mode, wrap file contents in <file> tags
+                echo "<file p=\"${ABS_PATH}\">" >> "$OUTPUT_FILE"
+                cat "$file" >> "$OUTPUT_FILE"
+                echo "</file>" >> "$OUTPUT_FILE"
+                echo "" >> "$OUTPUT_FILE"
+            else
+                # Standard mode with tags
+                echo "<${ABS_PATH}>" >> "$OUTPUT_FILE"
+                cat "$file" >> "$OUTPUT_FILE"
+                echo "" >> "$OUTPUT_FILE"
+                echo "</${ABS_PATH}>" >> "$OUTPUT_FILE"
+                echo "" >> "$OUTPUT_FILE"
+            fi
         fi
     fi
 done
 
-echo "Combined source files have been written to $OUTPUT_FILE"
+# If LLM mode is enabled, write the LLM template footer to the output file
+if [ "$LLM_MODE" = true ]; then
+    cat << EOF >> "$OUTPUT_FILE"
+</Codebase>
+
+#wdev101
+EOF
+fi
+
+# Copy to clipboard if in LLM mode
+if [ "$LLM_MODE" = true ]; then
+    if command -v pbcopy > /dev/null 2>&1; then
+        # macOS
+        cat "$OUTPUT_FILE" | pbcopy
+        echo "Combined source files have been written to $OUTPUT_FILE and copied to clipboard"
+    elif command -v xclip > /dev/null 2>&1; then
+        # Linux with xclip
+        cat "$OUTPUT_FILE" | xclip -selection clipboard
+        echo "Combined source files have been written to $OUTPUT_FILE and copied to clipboard"
+    elif command -v xsel > /dev/null 2>&1; then
+        # Linux with xsel
+        cat "$OUTPUT_FILE" | xsel --clipboard --input
+        echo "Combined source files have been written to $OUTPUT_FILE and copied to clipboard"
+    elif command -v clip > /dev/null 2>&1; then
+        # Windows
+        cat "$OUTPUT_FILE" | clip
+        echo "Combined source files have been written to $OUTPUT_FILE and copied to clipboard"
+    else
+        echo "Combined source files have been written to $OUTPUT_FILE"
+        echo "Warning: Could not copy to clipboard - no supported clipboard utility found (pbcopy, xclip, xsel, or clip)"
+    fi
+else
+    echo "Combined source files have been written to $OUTPUT_FILE"
+fi
