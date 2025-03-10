@@ -1,151 +1,90 @@
 #!/bin/bash
+# combine_sources.sh
+# This script combines every committed source code (text) file in a Git repository
+# into a single file named prompt.txt.
+# It supports optional filters:
+#   --include=DIR/         Only include files in DIR/ (and its subfolders)
+#   --exclude=file1,file2   Exclude any file with a basename matching file1, file2, etc.
+# The output tags now show the absolute path of each file based on the directory from where the script is run.
 
-# Simple text file processor that combines files into a single prompt.txt
-#
-# Usage:
-#   prompt                     # process all text files
-#   prompt --ignore main.dart  # everything except main.dart
-#   prompt home.dart          # finds and processes single file
-#   prompt lib/              # process all files in lib/
-#   prompt "*.dart"          # all dart files recursively
-#   prompt home.dart,settings.dart  # specific files
-#
-# Notes:
-#   - Searches recursively in current directory
-#   - Skips binary files and files >1MB
-#   - Outputs to prompt.txt with file headers
-#   - Automatically ignores itself and prompt.txt
+# Default values for optional parameters.
+INCLUDE=""
+EXCLUDE=""
 
-output_file="prompt.txt"
-ignore_files=""
-max_size=$((1024 * 1024))  # 1MB in bytes
-
-# Function to clean path (remove double slashes)
-clean_path() {
-    echo "$1" | sed 's#//#/#g'
-}
-
-# Function to check if file is text
-is_text_file() {
-    local file="$1"
-    if file "$file" | grep -q "text\|empty"; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Function to check file size
-check_file_size() {
-    local file="$1"
-    local size=$(stat -f%z "$file")
-    if [ "$size" -gt "$max_size" ]; then
-        return 1
-    fi
-    return 0
-}
-
-# Function to should_ignore
-should_ignore() {
-    local file="$1"
-    local basename=$(basename "$file")
-    
-    # Always ignore the script itself and the output file
-    if [[ "${file}" == *"prompt/prompt"* ]] || [[ "$basename" == "$output_file" ]]; then
-        return 0
-    fi
-    
-    if [ -n "$ignore_files" ]; then
-        IFS=',' read -ra IGNORE_ARRAY <<< "$ignore_files"
-        for ignore in "${IGNORE_ARRAY[@]}"; do
-            if [[ "${file}" == *"${ignore}"* ]]; then
-                return 0
-            fi
-        done
-    fi
-    return 1
-}
-
-# Function to process a single file
-process_file() {
-    local file="$(clean_path "$1")"
-    
-    if should_ignore "$file"; then
-        echo "Ignoring: $file"
-        return
-    fi
-    
-    if ! is_text_file "$file"; then
-        echo "Skipping binary file: $file"
-        return
-    fi
-
-    if ! check_file_size "$file"; then
-        echo "Skipping large file: $file (>1MB)"
-        return
-    fi
-    
-    echo "Processing: $file"
-    echo "// File: $file" >> "$output_file"
-    echo "-------------------" >> "$output_file"
-    cat "$file" >> "$output_file"
-    echo -e "\n\n" >> "$output_file"
-}
-
-# Function to find and process a single file
-find_and_process() {
-    local filename="$1"
-    local found_file=$(find . -type f -name "$filename" 2>/dev/null | head -n 1)
-    if [ -n "$found_file" ]; then
-        process_file "${found_file#./}"
-    else
-        echo "Not found: $filename"
-    fi
-}
-
-# Clear output file
-> "$output_file"
-
-# Parse arguments
-target=""
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --ignore)
-            ignore_files="$2"
-            shift 2
+# Parse command line arguments.
+for arg in "$@"; do
+    case $arg in
+        --include=*)
+            INCLUDE="${arg#*=}"
             ;;
-        *)
-            target="$1"
-            shift
+        --exclude=*)
+            EXCLUDE="${arg#*=}"
             ;;
     esac
 done
 
-# Process based on target
-if [ -z "$target" ]; then
-    # No target - process all files
-    find . -type f -print0 | while IFS= read -r -d '' file; do
-        process_file "${file#./}"
-    done
-elif [ -d "$target" ]; then
-    # Directory
-    find "$target" -type f -print0 | while IFS= read -r -d '' file; do
-        process_file "$(clean_path "${file#./}")"
-    done
-elif [[ "$target" == *","* ]]; then
-    # Comma-separated list of files
-    IFS=',' read -ra FILES <<< "$target"
-    for file in "${FILES[@]}"; do
-        find_and_process "$file"
-    done
-elif [[ "$target" == *"*"* ]]; then
-    # Glob pattern - search recursively
-    find . -type f -name "$target" -print0 | while IFS= read -r -d '' file; do
-        process_file "$(clean_path "${file#./}")"
-    done
-else
-    # Single filename
-    find_and_process "$target"
+# If INCLUDE is set, ensure it ends with a slash.
+if [ -n "$INCLUDE" ]; then
+    case "$INCLUDE" in
+        */) ;;  # already has a trailing slash.
+        *) INCLUDE="${INCLUDE}/" ;;
+    esac
 fi
 
-echo "Output written to $output_file" 
+# Verify that we are in a Git repository.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Error: This directory is not a Git repository."
+    exit 1
+fi
+
+# Get the absolute path of the current directory.
+BASE_DIR="$(pwd)"
+
+OUTPUT_FILE="prompt.txt"
+
+# Clear or create the output file.
+> "$OUTPUT_FILE"
+
+# If EXCLUDE is provided, split it into an array.
+IFS=',' read -r -a excludeArray <<< "$EXCLUDE"
+
+# Process each file tracked in the current HEAD.
+git ls-tree -r HEAD --name-only | while IFS= read -r file; do
+    # Skip the output file if it's tracked by Git.
+    if [ "$file" = "$OUTPUT_FILE" ]; then
+        continue
+    fi
+
+    # If INCLUDE is set, only process files that start with the provided directory.
+    if [ -n "$INCLUDE" ]; then
+        case "$file" in
+            "$INCLUDE"*) ;;  # match, continue processing.
+            *) continue ;;   # no match, skip.
+        esac
+    fi
+
+    # If EXCLUDE is set, check if the file's basename matches any exclude entry.
+    if [ ${#excludeArray[@]} -gt 0 ]; then
+        basename_file=$(basename "$file")
+        for exclude in "${excludeArray[@]}"; do
+            if [ "$basename_file" = "$exclude" ]; then
+                continue 2  # Skip to the next file.
+            fi
+        done
+    fi
+
+    # Only process regular files that exist.
+    if [ -f "$file" ]; then
+        # Check if the file is a text file.
+        if file "$file" | grep -q 'text'; then
+            ABS_PATH="${BASE_DIR}/${file}"
+            echo "<${ABS_PATH}>" >> "$OUTPUT_FILE"
+            cat "$file" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+            echo "</${ABS_PATH}>" >> "$OUTPUT_FILE"
+            echo "" >> "$OUTPUT_FILE"
+        fi
+    fi
+done
+
+echo "Combined source files have been written to $OUTPUT_FILE"
