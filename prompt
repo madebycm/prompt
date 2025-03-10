@@ -10,6 +10,7 @@
 #   --exclude-ext=ext1,ext2  Exclude files with these extensions (without the dot)
 #   --llm                    Format output for LLM processing
 #   --llm='instructions'    Format output for LLM processing with custom instructions and copy to clipboard
+#   --apply                  Apply modifications from clipboard containing XML operations
 #
 # The output tags now show the full absolute path based on the directory from where the script is run.
 # The script ensures that any existing prompt.txt file is deleted before creating a new one.
@@ -21,6 +22,7 @@ INCLUDE_EXT=""
 EXCLUDE_EXT=""
 LLM_MODE=false
 USER_INSTRUCTIONS=""
+APPLY_MODE=false
 
 # Parse command line arguments.
 for arg in "$@"; do
@@ -43,6 +45,9 @@ for arg in "$@"; do
             ;;
         --llm)
             LLM_MODE=true
+            ;;
+        --apply)
+            APPLY_MODE=true
             ;;
     esac
 done
@@ -71,6 +76,108 @@ fi
 
 # Get the absolute path of the current directory.
 BASE_DIR="$(pwd)"
+
+# Apply modifications mode
+if [ "$APPLY_MODE" = true ]; then
+    # Function to get clipboard content
+    get_clipboard_content() {
+        if command -v pbpaste > /dev/null 2>&1; then
+            # macOS
+            pbpaste
+        elif command -v xclip > /dev/null 2>&1; then
+            # Linux with xclip
+            xclip -selection clipboard -o
+        elif command -v xsel > /dev/null 2>&1; then
+            # Linux with xsel
+            xsel --clipboard --output
+        elif command -v powershell.exe > /dev/null 2>&1; then
+            # Windows with powershell
+            powershell.exe -command "Get-Clipboard"
+        else
+            echo "Error: No clipboard utility found (pbpaste, xclip, xsel, or powershell)"
+            exit 1
+        fi
+    }
+
+    # Get clipboard content
+    CLIPBOARD_CONTENT=$(get_clipboard_content)
+
+    # Check if clipboard contains a <Modification> XML
+    if [[ "$CLIPBOARD_CONTENT" != *"<Modification>"* ]] || [[ "$CLIPBOARD_CONTENT" != *"</Modification>"* ]]; then
+        echo "Error: Clipboard does not contain complete <Modification> XML"
+        exit 1
+    fi
+
+    # Extract just the Modification block
+    MODIFICATION_CONTENT=$(echo "$CLIPBOARD_CONTENT" | sed -n '/<Modification>/,/<\/Modification>/p')
+    
+    # Ensure we only have the Modification block
+    if [[ -z "$MODIFICATION_CONTENT" ]]; then
+        echo "Error: Could not extract <Modification> block"
+        exit 1
+    fi
+    
+    echo "Applying modifications from clipboard..."
+    
+    # Process replacement operations
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ \<replace\ p=\"([^\"]+)\" ]]; then
+            # Extract file path
+            FILE_PATH="${BASH_REMATCH[1]}"
+            
+            # Create directory if it doesn't exist
+            mkdir -p "$(dirname "$FILE_PATH")"
+            
+            # Extract content between <replace> and </replace>
+            # Using awk to avoid sed issues with paths containing special characters
+            FILE_PATH_ESCAPED=$(echo "$FILE_PATH" | sed 's/\//\\\//g')
+            CONTENT=$(echo "$MODIFICATION_CONTENT" | awk -v path="$FILE_PATH_ESCAPED" 'BEGIN {p=0} /<replace p="'"$FILE_PATH_ESCAPED"'">/{p=1; next} /<\/replace>/{if(p==1) p=0} p==1 {print}')
+            
+            # Write content to file
+            echo "$CONTENT" > "$FILE_PATH"
+            echo "Replaced: $FILE_PATH"
+        fi
+    done < <(echo "$MODIFICATION_CONTENT" | grep -o '<replace p="[^"]*"')
+
+    # Process create operations
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ \<create\ p=\"([^\"]+)\" ]]; then
+            # Extract file path
+            FILE_PATH="${BASH_REMATCH[1]}"
+            
+            # Create directory if it doesn't exist
+            mkdir -p "$(dirname "$FILE_PATH")"
+            
+            # Extract content between <create> and </create>
+            # Using awk to avoid sed issues with paths containing special characters
+            FILE_PATH_ESCAPED=$(echo "$FILE_PATH" | sed 's/\//\\\//g')
+            CONTENT=$(echo "$MODIFICATION_CONTENT" | awk -v path="$FILE_PATH_ESCAPED" 'BEGIN {p=0} /<create p="'"$FILE_PATH_ESCAPED"'">/{p=1; next} /<\/create>/{if(p==1) p=0} p==1 {print}')
+            
+            # Write content to file
+            echo "$CONTENT" > "$FILE_PATH"
+            echo "Created: $FILE_PATH"
+        fi
+    done < <(echo "$MODIFICATION_CONTENT" | grep -o '<create p="[^"]*"')
+
+    # Process delete operations
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ \<delete\ p=\"([^\"]+)\" ]]; then
+            # Extract file path
+            FILE_PATH="${BASH_REMATCH[1]}"
+            
+            # Delete the file if it exists
+            if [ -f "$FILE_PATH" ]; then
+                rm "$FILE_PATH"
+                echo "Deleted: $FILE_PATH"
+            else
+                echo "Warning: File to delete does not exist: $FILE_PATH"
+            fi
+        fi
+    done < <(echo "$MODIFICATION_CONTENT" | grep -o '<delete p="[^"]*"')
+
+    echo "Modifications applied successfully."
+    exit 0
+fi
 
 OUTPUT_FILE="prompt.txt"
 
