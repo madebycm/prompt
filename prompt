@@ -2,14 +2,21 @@
 # combine_sources.sh
 # This script combines every committed source code (text) file in a Git repository
 # into a single file named prompt.txt.
+#
 # It supports optional filters:
 #   --include=DIR/         Only include files in DIR/ (and its subfolders)
 #   --exclude=file1,file2   Exclude any file with a basename matching file1, file2, etc.
-# The output tags now show the absolute path of each file based on the directory from where the script is run.
+#   --include-ext=ext1,ext2  Only include files with these extensions (without the dot)
+#   --exclude-ext=ext1,ext2  Exclude files with these extensions (without the dot)
+#
+# The output tags now show the full absolute path based on the directory from where the script is run.
+# The script ensures that any existing prompt.txt file is deleted before creating a new one.
 
 # Default values for optional parameters.
 INCLUDE=""
 EXCLUDE=""
+INCLUDE_EXT=""
+EXCLUDE_EXT=""
 
 # Parse command line arguments.
 for arg in "$@"; do
@@ -20,16 +27,30 @@ for arg in "$@"; do
         --exclude=*)
             EXCLUDE="${arg#*=}"
             ;;
+        --include-ext=*)
+            INCLUDE_EXT="${arg#*=}"
+            ;;
+        --exclude-ext=*)
+            EXCLUDE_EXT="${arg#*=}"
+            ;;
     esac
 done
 
 # If INCLUDE is set, ensure it ends with a slash.
 if [ -n "$INCLUDE" ]; then
     case "$INCLUDE" in
-        */) ;;  # already has a trailing slash.
+        */) ;;  # already has trailing slash.
         *) INCLUDE="${INCLUDE}/" ;;
     esac
 fi
+
+# If INCLUDE_EXT is provided, split it into an array.
+IFS=',' read -r -a includeExtArray <<< "$INCLUDE_EXT"
+# If EXCLUDE_EXT is provided, split it into an array.
+IFS=',' read -r -a excludeExtArray <<< "$EXCLUDE_EXT"
+
+# If EXCLUDE (basename filtering) is provided, split it into an array.
+IFS=',' read -r -a excludeArray <<< "$EXCLUDE"
 
 # Verify that we are in a Git repository.
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -42,11 +63,11 @@ BASE_DIR="$(pwd)"
 
 OUTPUT_FILE="prompt.txt"
 
-# Clear or create the output file.
-> "$OUTPUT_FILE"
+# Delete the output file if it exists.
+rm -f "$OUTPUT_FILE"
 
-# If EXCLUDE is provided, split it into an array.
-IFS=',' read -r -a excludeArray <<< "$EXCLUDE"
+# Create a new empty output file.
+touch "$OUTPUT_FILE"
 
 # Process each file tracked in the current HEAD.
 git ls-tree -r HEAD --name-only | while IFS= read -r file; do
@@ -69,6 +90,35 @@ git ls-tree -r HEAD --name-only | while IFS= read -r file; do
         for exclude in "${excludeArray[@]}"; do
             if [ "$basename_file" = "$exclude" ]; then
                 continue 2  # Skip to the next file.
+            fi
+        done
+    fi
+
+    # Extract file extension (if any).
+    ext=""
+    if [[ "$file" == *.* ]]; then
+        ext="${file##*.}"
+    fi
+
+    # If INCLUDE_EXT is provided, only process files with a matching extension.
+    if [ -n "$INCLUDE_EXT" ]; then
+        match_ext=0
+        for incl in "${includeExtArray[@]}"; do
+            if [ "$ext" = "$incl" ]; then
+                match_ext=1
+                break
+            fi
+        done
+        if [ $match_ext -eq 0 ]; then
+            continue
+        fi
+    fi
+
+    # If EXCLUDE_EXT is provided, skip files with a matching extension.
+    if [ -n "$EXCLUDE_EXT" ]; then
+        for excl in "${excludeExtArray[@]}"; do
+            if [ "$ext" = "$excl" ]; then
+                continue 2
             fi
         done
     fi
